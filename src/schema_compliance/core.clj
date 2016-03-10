@@ -2,94 +2,45 @@
   (:require [clojure.data.json :as json])
   (:use [clojure.inspector :only [inspect inspect-tree]]))
 
-(defrecord Err [exception data])
-
 (defn read [src]
   (->
    src
-   (slurp)
-   (clojure.string/split #"\n")))
+   slurp
+   (json/read-str :key-fn keyword)))
 
-(defn summarize-read [d summary]
-  (swap! summary assoc :read {:total (count d)})
-  d)
+(defn ->list [subscriptions]
+  (for [{:keys [subscriber provider package type validUntil]} subscriptions
+        :when (nil? validUntil)]
+    [(:id subscriber) (:type subscriber) (:id provider) (:id package) (:name package) type]))
 
-(defn line->json [l]
-  (try
-    (json/read-str l)
-    (catch Exception e (Err. e l))))
+(defn ->csv [listed-subscriptions]
+  (->> listed-subscriptions 
+       (map (fn [line] (clojure.string/join ";" line)))
+       (clojure.string/join "\n")))
 
-(defn error? [d]
-  (instance? Err d))
-
-(defn basic-check [lines]
+(defn ->dot [subscriptions]
   (->>
-   lines 
-   (pmap line->json)
-   (group-by (complement error?))))
+    (for [{:keys [subscriber provider package type validUntil]} subscriptions
+          :when (nil? validUntil)]
+      (str "\"" (:id subscriber) "\" -> "
+           "\"" (:name package) "\n" (clojure.string/replace (:id package) #"-" "") "," (:id provider)  "\" [label=\"" type "\"];"))
+    (clojure.string/join "\n")))
 
-(defn filter-ok [d]
-  (or (get d true) []))
+(defn wrap-dot-content [content]
+  (str "digraph g {\n" "ranksep=30;\n ratio=auto;\n" content "\n}"))
 
-(defn filter-nok [d]
-  (or (get d false) []))
+(defn -main []
+  (let [subscriptions (->> "all_subscriptions_prod_orghybris.json"
+                           read)]
+    (->> subscriptions
+         ->list
+         ->csv
+         (str "subscriber name;subscriber type;provider name;package id;package name;subscription type\n")
+         (spit "all_subscriptions_prod_orghybris.csv"))
+    
+    (->> subscriptions
+         ->dot
+         wrap-dot-content
+         (spit "all_subscriptions_prod_orghybris.dot"))))
 
-(defn summarize-basic-check [d summary]
-  (swap! summary assoc
-         :basic-check
-         {:ok (count (filter-ok d))
-          :nok  (count (filter-nok d))})
-  d)
-
-(defn get-source-client [d]
-  (get d "sourceClient"))
-
-(defn get-event-type [d]
-  (get d "eventType"))
-
-(defn get-schema [d]
-  (get-in d ["metadata" "schema"]))
-
-(defn compliant? [d]
-  ((complement nil?) (get-schema d)))
-
-(defn compliance-check [d]
-  (group-by compliant? d)) 
-
-(defn summarize-compliance-check [d summary]
-  (let [ok (filter-ok d)
-        nok (filter-nok d)
-        schemas (distinct (map #(get-schema %) ok))]
-    (swap! summary assoc :compliance-check {:ok (count ok)
-                                            :ok-details {:schemas schemas}
-                                            :nok (count nok)
-                                            :nok-details {:events
-                                                          (->> nok
-                                                               (group-by get-source-client)
-                                                               (vec)
-                                                               (map (fn [[source-client events]]
-                                                                      {source-client (frequencies (map #(get-event-type %) events))}))
-                                                               (reduce merge))}}))
-  d)
-
-(defn summarize 
-  ([summary] @summary)
-  ([_ summary] (summarize summary)))
-
-
-(def summary (let [summary (atom {})]
-               (->
-                src
-                (read)
-                (summarize-read summary)
-                (basic-check)
-                (summarize-basic-check summary)
-                (filter-ok)
-                (compliance-check)
-                (summarize-compliance-check summary)
-                (summarize summary))))
-
-
-;(def src "TODO")
-
-;(spit "TODO" (json/write-str summary :escape-slash false))
+(-main)
